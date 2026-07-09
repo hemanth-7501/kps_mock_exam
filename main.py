@@ -149,8 +149,8 @@ def home(request: Request):
           <div class="bg-white rounded-3xl shadow-sm border border-slate-200 p-6">
             <h2 class="text-xl font-semibold mb-4">Student Login</h2>
             <form action="/student-login" method="post" class="space-y-3">
-              <input name="username" value="student" class="w-full border rounded-xl px-3 py-2" />
-              <input name="password" type="password" value="kspstudent123" class="w-full border rounded-xl px-3 py-2" />
+              <input name="username" placeholder="Enter username" class="w-full border rounded-xl px-3 py-2" required />
+              <input name="password" type="password" placeholder="Enter password" class="w-full border rounded-xl px-3 py-2" required />
               <button class="w-full bg-sky-600 hover:bg-sky-700 text-white py-2 rounded-xl">Enter Exam</button>
             </form>
             <p class="text-sm text-slate-500 mt-3">No account yet? <a href="/register" class="text-sky-600 font-semibold">Register as a student</a></p>
@@ -158,8 +158,8 @@ def home(request: Request):
           <div class="bg-white rounded-3xl shadow-sm border border-slate-200 p-6">
             <h2 class="text-xl font-semibold mb-4">Admin Login</h2>
             <form action="/admin-login" method="post" class="space-y-3">
-              <input name="username" value="admin" class="w-full border rounded-xl px-3 py-2" />
-              <input name="password" type="password" value="kspadmin123" class="w-full border rounded-xl px-3 py-2" />
+              <input name="username" placeholder="Enter admin username" class="w-full border rounded-xl px-3 py-2" required />
+              <input name="password" type="password" placeholder="Enter admin password" class="w-full border rounded-xl px-3 py-2" required />
               <button class="w-full bg-slate-800 hover:bg-slate-900 text-white py-2 rounded-xl">Open Admin Panel</button>
             </form>
           </div>
