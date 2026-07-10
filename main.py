@@ -11,6 +11,7 @@ import math
 import time
 import random
 from datetime import datetime, timedelta
+import sqlite3
 
 app = FastAPI(title="KSP Police Constable Mock Exam")
 app.mount("/static", StaticFiles(directory="."), name="static")
@@ -98,8 +99,149 @@ for i in range(1, 101):
     QUESTIONS.append(q)
 
 ADMIN_CREDENTIALS = {"admin": "kspadmin123"}
-STUDENT_CREDENTIALS = {"student": "kspstudent123"}
 AUTH_COOKIE = "exam_user"
+DB_PATH = os.path.join(os.getcwd(), "data.db")
+
+
+def get_db_conn():
+  conn = sqlite3.connect(DB_PATH)
+  conn.row_factory = sqlite3.Row
+  return conn
+
+
+def init_db():
+  conn = get_db_conn()
+  cur = conn.cursor()
+  cur.execute("""
+  CREATE TABLE IF NOT EXISTS submissions (
+    id INTEGER PRIMARY KEY,
+    username TEXT,
+    date TEXT,
+    started_at TEXT,
+    score REAL,
+    percent REAL,
+    correct INTEGER,
+    incorrect INTEGER,
+    unattempted INTEGER,
+    total_questions INTEGER,
+    answers TEXT,
+    status TEXT,
+    graded INTEGER
+  )
+  """)
+  cur.execute("""
+  CREATE TABLE IF NOT EXISTS students (
+    username TEXT PRIMARY KEY,
+    password TEXT
+  )
+  """)
+  conn.commit()
+  conn.close()
+
+
+def load_students_from_db():
+  if not os.path.exists(DB_PATH):
+    return {}
+  conn = get_db_conn()
+  cur = conn.cursor()
+  cur.execute("SELECT username, password FROM students")
+  rows = cur.fetchall()
+  students = {row["username"]: row["password"] for row in rows}
+  conn.close()
+  return students
+
+
+def save_student_to_db(username: str, password: str):
+  conn = get_db_conn()
+  cur = conn.cursor()
+  cur.execute("INSERT OR REPLACE INTO students (username, password) VALUES (?, ?)", (username, password))
+  conn.commit()
+  conn.close()
+
+
+def verify_student_credentials(username: str, password: str) -> bool:
+  conn = get_db_conn()
+  cur = conn.cursor()
+  cur.execute("SELECT password FROM students WHERE username = ?", (username,))
+  row = cur.fetchone()
+  conn.close()
+  return bool(row and row["password"] == password)
+
+
+def student_exists(username: str) -> bool:
+  conn = get_db_conn()
+  cur = conn.cursor()
+  cur.execute("SELECT 1 FROM students WHERE username = ?", (username,))
+  exists = cur.fetchone() is not None
+  conn.close()
+  return exists
+
+
+def load_submissions_from_db():
+  if not os.path.exists(DB_PATH):
+    return []
+  conn = get_db_conn()
+  cur = conn.cursor()
+  cur.execute("SELECT * FROM submissions ORDER BY id ASC")
+  rows = cur.fetchall()
+  results = []
+  for r in rows:
+    results.append({
+      "id": r["id"],
+      "username": r["username"],
+      "date": r["date"],
+      "started_at": r["started_at"],
+      "score": r["score"],
+      "percent": r["percent"],
+      "correct": r["correct"],
+      "incorrect": r["incorrect"],
+      "unattempted": r["unattempted"],
+      "total_questions": r["total_questions"],
+      "answers": r["answers"],
+      "status": r["status"],
+      "graded": bool(r["graded"])
+    })
+  conn.close()
+  return results
+
+
+def save_submission_to_db(submission: dict):
+  conn = get_db_conn()
+  cur = conn.cursor()
+  cur.execute("""
+  INSERT OR REPLACE INTO submissions (id, username, date, started_at, score, percent, correct, incorrect, unattempted, total_questions, answers, status, graded)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  """, (
+    submission.get("id"),
+    submission.get("username"),
+    submission.get("date"),
+    submission.get("started_at"),
+    submission.get("score"),
+    submission.get("percent"),
+    submission.get("correct"),
+    submission.get("incorrect"),
+    submission.get("unattempted"),
+    submission.get("total_questions"),
+    submission.get("answers"),
+    submission.get("status"),
+    1 if submission.get("graded") else 0
+  ))
+  conn.commit()
+  conn.close()
+
+
+def update_submission_in_db(submission: dict):
+  # same as save (INSERT OR REPLACE handles it)
+  save_submission_to_db(submission)
+
+
+# Initialize DB and load existing submissions into memory
+init_db()
+if not student_exists("student"):
+  save_student_to_db("student", "kspstudent123")
+loaded = load_submissions_from_db()
+if loaded:
+  SUBMISSIONS.extend(loaded)
 
 def get_current_user(request: Request) -> Optional[str]:
     return request.cookies.get(AUTH_COOKIE)
@@ -205,19 +347,19 @@ def register_student(username: str = Form(...), password: str = Form(...), confi
         return HTMLResponse("<h2>Username and password are required</h2>", status_code=400)
     if password != confirm_password:
         return HTMLResponse("<h2>Passwords do not match</h2>", status_code=400)
-    if username in STUDENT_CREDENTIALS:
+    if student_exists(username):
         return HTMLResponse("<h2>Username already exists</h2>", status_code=400)
-    STUDENT_CREDENTIALS[username] = password
+    save_student_to_db(username, password)
     response = RedirectResponse(url="/exam", status_code=303)
-    response.set_cookie(key=AUTH_COOKIE, value="student", httponly=True)
+    response.set_cookie(key=AUTH_COOKIE, value=username, httponly=True)
     return response
 
 
 @app.post("/student-login")
 def student_login(username: str = Form(...), password: str = Form(...)):
-    if username in STUDENT_CREDENTIALS and password == STUDENT_CREDENTIALS[username]:
+    if verify_student_credentials(username, password):
         response = RedirectResponse(url="/exam", status_code=303)
-        response.set_cookie(key=AUTH_COOKIE, value="student", httponly=True)
+        response.set_cookie(key=AUTH_COOKIE, value=username, httponly=True)
         return response
     return HTMLResponse("<h2>Invalid student credentials</h2>", status_code=401)
 
@@ -239,7 +381,10 @@ def logout():
 
 
 @app.get("/exam", response_class=HTMLResponse)
-def exam_page():
+def exam_page(request: Request):
+    current_user = get_current_user(request)
+    if not current_user or current_user == "admin":
+        return RedirectResponse(url="/", status_code=303)
     if not EXAM_CONFIG["is_live"]:
         return HTMLResponse("""
         <!DOCTYPE html>
@@ -380,7 +525,7 @@ def exam_page():
         </div>
 
         <form id="exam-form" action="/submit" method="post" style="display:none;">
-            <input type="hidden" name="username" id="username" value="student">
+            <input type="hidden" name="username" id="username" value="{current_user}">
             <input type="hidden" name="started_at" id="started_at" value="{datetime.utcnow().isoformat()}">
             <div id="answer-inputs"></div>
         </form>
@@ -456,6 +601,11 @@ async def submit_exam(request: Request):
         "graded": False,
     }
     SUBMISSIONS.append(submission)
+    # persist to DB so submissions are available across processes
+    try:
+      save_submission_to_db(submission)
+    except Exception:
+      pass
 
     return HTMLResponse(f"""
     <!DOCTYPE html>
@@ -836,6 +986,11 @@ def grade_submission(request: Request, submission_index: int = Form(...), score:
     submission["percent"] = round((submission["score"] / submission["total_questions"]) * 100, 2) if submission["total_questions"] else 0.0
     submission["status"] = "released"
     submission["graded"] = True
+    # persist updates to DB
+    try:
+      update_submission_in_db(submission)
+    except Exception:
+      pass
     return RedirectResponse(url="/admin", status_code=303)
 
 
@@ -933,6 +1088,24 @@ def download_results(request: Request):
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=exam_results.csv"}
     )
+
+
+# Debug endpoint to inspect submissions in-memory (for troubleshooting only)
+@app.get("/_debug/submissions")
+def debug_submissions(request: Request):
+  # Allow requests from localhost without auth so local debugging tools/curl can access this.
+  client_host = None
+  try:
+    client_host = request.client.host
+  except Exception:
+    client_host = None
+
+  if client_host not in ("127.0.0.1", "::1", "localhost"):
+    deny = require_admin(request)
+    if deny:
+      return deny
+
+  return JSONResponse({"count": len(SUBMISSIONS), "submissions": SUBMISSIONS})
 
 
 if __name__ == "__main__":
