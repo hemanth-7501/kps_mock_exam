@@ -13,8 +13,10 @@ import random
 from datetime import datetime, timedelta
 import sqlite3
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 app = FastAPI(title="KSP Police Constable Mock Exam")
-app.mount("/static", StaticFiles(directory="."), name="static")
+app.mount("/static", StaticFiles(directory=BASE_DIR), name="static")
 
 QUESTIONS = []
 SUBMISSIONS = []
@@ -100,7 +102,7 @@ for i in range(1, 101):
 
 ADMIN_CREDENTIALS = {"admin": "kspadmin123"}
 AUTH_COOKIE = "exam_user"
-DB_PATH = os.path.join(os.getcwd(), "data.db")
+DB_PATH = os.path.join(BASE_DIR, "data.db")
 
 
 def get_db_conn():
@@ -208,24 +210,44 @@ def load_submissions_from_db():
 def save_submission_to_db(submission: dict):
   conn = get_db_conn()
   cur = conn.cursor()
-  cur.execute("""
-  INSERT OR REPLACE INTO submissions (id, username, date, started_at, score, percent, correct, incorrect, unattempted, total_questions, answers, status, graded)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  """, (
-    submission.get("id"),
-    submission.get("username"),
-    submission.get("date"),
-    submission.get("started_at"),
-    submission.get("score"),
-    submission.get("percent"),
-    submission.get("correct"),
-    submission.get("incorrect"),
-    submission.get("unattempted"),
-    submission.get("total_questions"),
-    submission.get("answers"),
-    submission.get("status"),
-    1 if submission.get("graded") else 0
-  ))
+  if submission.get("id"):
+    cur.execute("""
+    INSERT OR REPLACE INTO submissions (id, username, date, started_at, score, percent, correct, incorrect, unattempted, total_questions, answers, status, graded)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+      submission.get("id"),
+      submission.get("username"),
+      submission.get("date"),
+      submission.get("started_at"),
+      submission.get("score"),
+      submission.get("percent"),
+      submission.get("correct"),
+      submission.get("incorrect"),
+      submission.get("unattempted"),
+      submission.get("total_questions"),
+      submission.get("answers"),
+      submission.get("status"),
+      1 if submission.get("graded") else 0
+    ))
+  else:
+    cur.execute("""
+    INSERT INTO submissions (username, date, started_at, score, percent, correct, incorrect, unattempted, total_questions, answers, status, graded)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+      submission.get("username"),
+      submission.get("date"),
+      submission.get("started_at"),
+      submission.get("score"),
+      submission.get("percent"),
+      submission.get("correct"),
+      submission.get("incorrect"),
+      submission.get("unattempted"),
+      submission.get("total_questions"),
+      submission.get("answers"),
+      submission.get("status"),
+      1 if submission.get("graded") else 0
+    ))
+    submission["id"] = cur.lastrowid
   conn.commit()
   conn.close()
 
@@ -233,6 +255,31 @@ def save_submission_to_db(submission: dict):
 def update_submission_in_db(submission: dict):
   # same as save (INSERT OR REPLACE handles it)
   save_submission_to_db(submission)
+
+
+def get_submission_by_id(submission_id: int):
+  conn = get_db_conn()
+  cur = conn.cursor()
+  cur.execute("SELECT * FROM submissions WHERE id = ?", (submission_id,))
+  r = cur.fetchone()
+  conn.close()
+  if not r:
+    return None
+  return {
+    "id": r["id"],
+    "username": r["username"],
+    "date": r["date"],
+    "started_at": r["started_at"],
+    "score": r["score"],
+    "percent": r["percent"],
+    "correct": r["correct"],
+    "incorrect": r["incorrect"],
+    "unattempted": r["unattempted"],
+    "total_questions": r["total_questions"],
+    "answers": r["answers"],
+    "status": r["status"],
+    "graded": bool(r["graded"])
+  }
 
 
 # Initialize DB and load existing submissions into memory
@@ -586,7 +633,6 @@ async def submit_exam(request: Request):
         answers[str(i)] = str(chosen).upper() if chosen else None
 
     submission = {
-        "id": len(SUBMISSIONS) + 1,
         "username": username,
         "date": datetime.now().isoformat(),
         "started_at": started_at,
@@ -600,12 +646,12 @@ async def submit_exam(request: Request):
         "status": "pending",
         "graded": False,
     }
-    SUBMISSIONS.append(submission)
-    # persist to DB so submissions are available across processes
     try:
       save_submission_to_db(submission)
     except Exception:
       pass
+    if submission.get("id"):
+      SUBMISSIONS.append(submission)
 
     return HTMLResponse(f"""
     <!DOCTYPE html>
@@ -651,10 +697,11 @@ def admin_page(request: Request):
     
     # Build results table
     results_rows = ""
-    for idx, sub in enumerate(SUBMISSIONS):
+    submissions = load_submissions_from_db()
+    for idx, sub in enumerate(submissions):
         status_label = "Released" if sub.get("status") == "released" else "Pending"
         status_classes = "text-emerald-700 bg-emerald-100" if sub.get("status") == "released" else "text-amber-700 bg-amber-100"
-        action = f"<a href='/grade/{idx}' class='text-sky-600 hover:text-sky-800 font-semibold'>Review</a>" if sub.get("status") != "released" else "<span class='text-slate-500'>Released</span>"
+        action = f"<a href='/grade/{sub['id']}' class='text-sky-600 hover:text-sky-800 font-semibold'>Review</a>" if sub.get("status") != "released" else "<span class='text-slate-500'>Released</span>"
         results_rows += f"""
         <tr class='border-b border-slate-200 hover:bg-slate-50'>
             <td class='px-4 py-3'>{idx}</td>
@@ -869,15 +916,14 @@ def upload_pdf(request: Request, file: UploadFile = File(...)):
     return RedirectResponse(url="/admin", status_code=303)
 
 
-@app.get("/grade/{submission_index}", response_class=HTMLResponse)
-def grade_submission_page(request: Request, submission_index: int):
+@app.get("/grade/{submission_id}", response_class=HTMLResponse)
+def grade_submission_page(request: Request, submission_id: int):
     deny = require_admin(request)
     if deny:
         return deny
-    if submission_index < 0 or submission_index >= len(SUBMISSIONS):
+    submission = get_submission_by_id(submission_id)
+    if submission is None:
         return HTMLResponse("<h2>Submission not found</h2>", status_code=404)
-
-    submission = SUBMISSIONS[submission_index]
     answers = json.loads(submission["answers"])
     answer_rows = "".join([
         f"<tr class='border-b border-slate-200'><td class='px-4 py-3'>Q{question}</td><td class='px-4 py-3'>{answer or 'Unanswered'}</td></tr>"
@@ -940,7 +986,7 @@ def grade_submission_page(request: Request, submission_index: int):
           <div class="bg-white rounded-3xl border border-slate-200 p-6">
             <h2 class="text-xl font-semibold mb-4">Manual Grade</h2>
             <form action="/grade-submission" method="post" class="space-y-4">
-              <input type="hidden" name="submission_index" value="{submission_index}" />
+              <input type="hidden" name="submission_id" value="{submission['id']}" />
               <div>
                 <label class="block text-sm font-semibold mb-2">Score</label>
                 <input name="score" type="number" step="0.25" min="0" value="{submission.get('score') or ''}" class="w-full border rounded-xl px-3 py-2" required />
@@ -971,14 +1017,13 @@ def grade_submission_page(request: Request, submission_index: int):
 
 
 @app.post("/grade-submission")
-def grade_submission(request: Request, submission_index: int = Form(...), score: float = Form(...), correct: int = Form(...), incorrect: int = Form(...), unattempted: int = Form(...)):
+def grade_submission(request: Request, submission_id: int = Form(...), score: float = Form(...), correct: int = Form(...), incorrect: int = Form(...), unattempted: int = Form(...)):
     deny = require_admin(request)
     if deny:
         return deny
-    if submission_index < 0 or submission_index >= len(SUBMISSIONS):
+    submission = get_submission_by_id(submission_id)
+    if submission is None:
         return HTMLResponse("<h2>Submission not found</h2>", status_code=404)
-
-    submission = SUBMISSIONS[submission_index]
     submission["score"] = round(score, 2)
     submission["correct"] = correct
     submission["incorrect"] = incorrect
@@ -986,13 +1031,11 @@ def grade_submission(request: Request, submission_index: int = Form(...), score:
     submission["percent"] = round((submission["score"] / submission["total_questions"]) * 100, 2) if submission["total_questions"] else 0.0
     submission["status"] = "released"
     submission["graded"] = True
-    # persist updates to DB
     try:
-      update_submission_in_db(submission)
+        update_submission_in_db(submission)
     except Exception:
-      pass
+        pass
     return RedirectResponse(url="/admin", status_code=303)
-
 
 @app.post("/upload-csv")
 def upload_csv(request: Request, file: UploadFile = File(...)):
